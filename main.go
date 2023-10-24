@@ -1,22 +1,40 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
+	"github.com/ahmadjlallad/rssagg-go/internal/database"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 	"log"
 	"net/http"
 	"os"
 )
 
+type apiConfig struct {
+	DB *database.Queries
+}
+
 func main() {
-	port, loadEnvError := loadEnv()
+	loadEnvError := loadEnv()
 	if loadEnvError != nil {
 		log.Fatalln(loadEnvError)
-		return
 	}
+
+	port := getEnvOrFatal("PORT")
+	dbUrl := getEnvOrFatal("DB_URL")
+
+	connection, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	queries := database.New(connection)
+	apiCfg := apiConfig{queries}
 
 	r := chi.NewRouter()
 	v1 := chi.NewRouter()
@@ -25,11 +43,24 @@ func main() {
 	// v1 mounted
 	r.Mount("/v1", v1)
 	v1.Get("/healthz", handlerReadiness)
+	r.Get("/pingHandler", pingHandler)
 	v1.Get("/error", handlerErr)
 
-	r.Get("/ping", ping)
+	v1.Post("/users", apiCfg.handlerCreateUser)
+	v1.Get("/users", apiCfg.middlewareAuth(apiCfg.handlerGetUserByAPIKey))
 
-	runServer(port, r)
+	v1.Post("/feeds", apiCfg.middlewareAuth(apiCfg.handlerCreateFeed))
+	v1.Get("/feeds", apiCfg.handlerListFeeds)
+
+	v1.Post("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerCreateFeedFollow))
+	v1.Get("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerListFeedsFollows))
+	v1.Delete("/feed_follows/{feedFollowID}", apiCfg.middlewareAuth(apiCfg.handlerDeleteFeedFollow))
+
+	server := &http.Server{Handler: r, Addr: ":" + port}
+	fmt.Printf("server is running on http://localhost:%v", port)
+	if server.ListenAndServe() != nil {
+		log.Fatalln(err)
+	}
 }
 
 func makeCors() func(next http.Handler) http.Handler {
@@ -45,22 +76,16 @@ func makeCors() func(next http.Handler) http.Handler {
 	})
 }
 
-func loadEnv() (string, error) {
+func loadEnv() error {
 
 	err := godotenv.Load(".env")
 	if err != nil {
-		return "", errors.New("FATAL: .env file dose not exist")
+		return errors.New("FATAL: .env file dose not exist")
 	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		return "", errors.New("FATAL: port is not set")
-	}
-
-	return port, nil
+	return nil
 }
 
-func ping(w http.ResponseWriter, r *http.Request) {
+func pingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write([]byte("Bong"))
 	if err != nil {
@@ -69,13 +94,11 @@ func ping(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func runServer(port string, r http.Handler) *http.Server {
-	server := &http.Server{Handler: r, Addr: ":" + port}
-	err := server.ListenAndServe()
-	if err != nil {
-		log.Fatalln(err)
-		return nil
+func getEnvOrFatal(env string) string {
+	envValue := os.Getenv(env)
+	if envValue == "" {
+		log.Fatalf("FATAL: %v is not set\n", env)
 	}
-	log.Printf("server started on %v\n", port)
-	return server
+
+	return envValue
 }
